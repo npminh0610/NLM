@@ -124,6 +124,19 @@ def compute_view_limits(p):
         return None
     return (min(xs) - 1.6, max(xs) + 2.0, min(ys) - 1.6, max(ys) + 1.4)
 
+def can_full_rotate(p, step=1):
+    """True nếu khâu dẫn quay trọn 360° liên tục, không văng nhánh lắp ráp."""
+    prev, first = None, None
+    for a in range(0, 360 + step, step):
+        try:
+            pts = solve_positions(dict(p, phi2=a), prev)
+        except ValueError:
+            return False
+        if first is None:
+            first = pts["C"]
+        prev = pts["C"]
+    return bool(np.allclose(prev, first, atol=1e-6))
+
 
 # ----------------------------------------------------------------------
 # 2b. PHÂN TÍCH VẬN TỐC
@@ -511,6 +524,7 @@ def pick_font(candidates, fallback):
 
 class MechanismHMI(tk.Tk):
     def __init__(self):
+        
         super().__init__()
         self.title("Lược đồ cơ cấu 4 khâu bản lề")
         self.geometry("1600x900")
@@ -523,7 +537,7 @@ class MechanismHMI(tk.Tk):
         self._after = None
         self._loading = False
         self.history = load_history()
-
+        self._full_rot = False
         global FONT, MONO
         FONT = pick_font(["Segoe UI", "Inter", "IBM Plex Sans", "Noto Sans",
                           "DejaVu Sans", "Arial"], "TkDefaultFont")
@@ -1161,6 +1175,7 @@ class MechanismHMI(tk.Tk):
             messagebox.showerror("Lỗi dữ liệu", str(ex))
             return
         self._anim_lim = compute_view_limits(p)
+        self._full_rot = can_full_rotate(p)
         self.animating = True
         self.anim_dir = 1
         self.btn_anim.config(text="⏸  Dừng", bg=C["danger"])
@@ -1179,21 +1194,31 @@ class MechanismHMI(tk.Tk):
         new = p["phi2"] + base * self.anim_dir * step
         try:
             solve_positions(dict(p, phi2=new), self._prev_C)
-        except ValueError:                               # hết hành trình -> đảo chiều
-            self.anim_dir *= -1
-            new = p["phi2"] + base * self.anim_dir * step
-            try:
-                solve_positions(dict(p, phi2=new), self._prev_C)
-            except ValueError:
-                self.on_anim_toggle()
-                return
+        except ValueError:
+            if self._full_rot:
+                # quay trọn vòng được mà vẫn lỗi (bước quá lớn): thử bước nhỏ, không đảo chiều
+                new = p["phi2"] + base * self.anim_dir * 1.0
+                try:
+                    solve_positions(dict(p, phi2=new), self._prev_C)
+                except ValueError:
+                    self.on_anim_toggle()
+                    return
+            else:
+                # tay quay-lắc: chỉ lắc trong một khoảng, đảo chiều là đúng
+                self.anim_dir *= -1
+                new = p["phi2"] + base * self.anim_dir * step
+                try:
+                    solve_positions(dict(p, phi2=new), self._prev_C)
+                except ValueError:
+                    self.on_anim_toggle()
+                    return
         self._loading = True                             # không kích hoạt vẽ trễ 450 ms
         self.entries["phi2"].set(f"{new % 360:.1f}")
         self._loading = False
         self.on_draw(True)
         if self.animating:
             self._anim_job = self.after(40, self._anim_tick)
-
+        
     def on_save(self):
         if self.last_params is None:
             messagebox.showwarning("Chưa có kết quả", "Hãy nhập thông số hợp lệ trước khi lưu.")
