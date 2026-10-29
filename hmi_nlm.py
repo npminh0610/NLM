@@ -13,7 +13,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.patches import Arc, FancyArrowPatch, Circle
 from matplotlib.lines import Line2D
 
-#Màu giao diện
+#---- Màu giao diện----
 C = dict(
     header="#16231f", header_sub="#9fb5ae", header_btn_bg="#22332e",
     page="#eeefec", card="#ffffff", border="#e1e4df",
@@ -25,20 +25,29 @@ C = dict(
     force="#c2610c", m3="#6d4fd6", m4="#c2307a", danger="#b3261e",
     phi="#e11d1d",
 )
+#---Phông chữ---#
 FONT = "Segoe UI"
 MONO = "Consolas"
 
+#--Lịch sử thông số đã lưu----
 HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "lich_su_thong_so.json")
 HISTORY_MAX = 50
 
-# ----------------------------------------------------------------------
-# 1. GIÁ TRỊ MẶC ĐỊNH (chỉ dùng khi chưa có lịch sử)
-# ----------------------------------------------------------------------
-DEFAULT = dict(L2=5.0, L3=4.5, lBM=2.0, lME=1.0, L4=6.0, L1=3.0, phi2=10.0,
-               omega2=5.0, omega2_dir="cùng", eps2=10.0, eps2_dir="cùng",
-               P3=210.0, alpha=10.0, M3=30.0, M4=150.0,
-               m3=2.0, Js3=2.5, m4=1.0)
+
+#---Các phương án cho trước---#
+
+PRESETS = {
+    "PA 1": dict(L2=5.0, L3=4.5, lBM=2.0, lME=1.0, L4=6.0, L1=3.0, phi2=10.0,
+                 omega2=5.0, omega2_dir="cùng", eps2=10.0, eps2_dir="cùng",
+                 P3=210.0, alpha=10.0, M3=30.0, M4=150.0,
+                 m3=2.0, Js3=2.5, m4=1.0),
+    "PA 2": dict(L2=5.0, L3=4.0, lBM=2.5, lME=1.5, L4=6.0, L1=3.0, phi2=20.0,
+                 omega2=5.0, omega2_dir="cùng", eps2=20.0, eps2_dir="ngược",
+                 P3=240.0, alpha=20.0, M3=60.0, M4=200.0,
+                 m3=3.0, Js3=3.0, m4=2.0),
+}
+DEFAULT = PRESETS["PA 1"]
 
 FIELDS = [
     ("L2", "L₂ = lAB  (m)"), ("L3", "L₃ = lBC  (m)"),
@@ -56,12 +65,15 @@ DIR_FIELDS = [
     ("eps2_dir", "Chiều ε₂ so với kim đồng hồ"),
 ]
 LABELS.update(dict(DIR_FIELDS))
+ALL_KEYS = [k for k, _ in FIELDS] + [k for k, _ in DIR_FIELDS]
 
 
 # ----------------------------------------------------------------------
 # 2. HÌNH HỌC
 # ----------------------------------------------------------------------
-def circle_intersect(p0, r0, p1, r1, branch="upper"):
+def circle_intersect(p0, r0, p1, r1, branch="upper", prev=None):
+    """Giao điểm 2 đường tròn. Nếu có `prev` thì chọn nghiệm gần prev nhất
+    (giữ liên tục nhánh lắp ráp khi chạy hoạt hình), ngược lại chọn theo `branch`."""
     p0 = np.array(p0, dtype=float)
     p1 = np.array(p1, dtype=float)
     d = np.linalg.norm(p1 - p0)
@@ -73,17 +85,20 @@ def circle_intersect(p0, r0, p1, r1, branch="upper"):
     ux, uy = (p1 - p0) / d
     s1 = np.array([p2[0] + h * uy, p2[1] - h * ux])
     s2 = np.array([p2[0] - h * uy, p2[1] + h * ux])
+    if prev is not None:
+        prev = np.asarray(prev, dtype=float)
+        return s1 if np.linalg.norm(s1 - prev) <= np.linalg.norm(s2 - prev) else s2
     if branch == "upper":
         return s1 if s1[1] >= s2[1] else s2
     return s2 if s1[1] >= s2[1] else s1
 
 
-def solve_positions(p):
+def solve_positions(p, prev_C=None):
     A = np.array([0.0, 0.0])
     D = np.array([p["L1"], 0.0])
     phi2 = np.radians(p["phi2"])
     B = A + p["L2"] * np.array([np.cos(phi2), np.sin(phi2)])
-    Cc = circle_intersect(B, p["L3"], D, p["L4"], "upper")
+    Cc = circle_intersect(B, p["L3"], D, p["L4"], "upper", prev_C)
     if Cc is None:
         raise ValueError("Không dựng được cơ cấu với bộ thông số này "
                          "(vòng kín BCD không tồn tại). Kiểm tra L2, L3, L4, L1, φ2.")
@@ -92,6 +107,22 @@ def solve_positions(p):
     d = (Cc - B) / BC
     E = M + p["lME"] * np.array([d[1], -d[0]])
     return dict(A=A, B=B, C=Cc, D=D, M=M, E=E)
+
+
+def compute_view_limits(p):
+    xs, ys = [], []
+    prev = None
+    for a in range(0, 360, 4):
+        try:
+            pts = solve_positions(dict(p, phi2=a), prev)
+        except ValueError:
+            continue
+        prev = pts["C"]
+        for q in pts.values():
+            xs.append(q[0]); ys.append(q[1])
+    if not xs:
+        return None
+    return (min(xs) - 1.6, max(xs) + 2.0, min(ys) - 1.6, max(ys) + 1.4)
 
 
 # ----------------------------------------------------------------------
@@ -218,7 +249,7 @@ def accel_text(p, acc):
 # ----------------------------------------------------------------------
 # 3. VẼ LƯỢC ĐỒ
 # ----------------------------------------------------------------------
-def draw_mechanism(ax, pts, p):
+def draw_mechanism(ax, pts, p, lim=None):
     ax.clear()
     ax.set_facecolor(C["plot_bg"])
     A, B, Cc, D, M, E = (pts[k] for k in "ABCDME")
@@ -255,10 +286,12 @@ def draw_mechanism(ax, pts, p):
     ax.annotate("E", E, textcoords="offset points", xytext=(6, -14),
                 fontsize=10, fontweight="bold", color=C["text"], zorder=5)
 
-    # góc φ2
-    ang = np.degrees(np.arctan2(B[1] - A[1], B[0] - A[0]))
+    # góc φ2 (chuẩn hóa về [0, 360) để cung đúng cả khi φ2 > 180°)
+    ang = np.degrees(np.arctan2(B[1] - A[1], B[0] - A[0])) % 360
     rad = .6
-    ax.add_patch(Arc(A, 2 * rad, 2 * rad, theta1=0, theta2=ang, color=C["phi"], lw=1.4, zorder=3))
+    if ang > 1e-6:
+        ax.add_patch(Arc(A, 2 * rad, 2 * rad, theta1=0, theta2=ang,
+                         color=C["phi"], lw=1.4, zorder=3))
     mid = np.radians(ang / 2)
     ax.annotate(r"$\varphi_2$", A + rad * 1.35 * np.array([np.cos(mid), np.sin(mid)]),
                 color=C["phi"], fontsize=11, zorder=5)
@@ -274,20 +307,26 @@ def draw_mechanism(ax, pts, p):
     ax.annotate(r"$\alpha$", E + 0.75 * np.array([1, 0]), textcoords="offset points",
                 xytext=(0, -14), color=C["force"], fontsize=10)
 
-    # mô men M3, M4
-    def moment_arc(center, radius, label, color):
+    # mô men M3, M4: giá trị dương -> ngược chiều kim đồng hồ, âm -> cùng chiều kim đồng hồ
+    def moment_arc(center, radius, label, color, value):
         ax.add_patch(Arc(center, 2 * radius, 2 * radius, theta1=30, theta2=300,
                          color=color, lw=1.8, zorder=3))
-        t = np.radians(300)
+        if value >= 0:      # CCW: mũi tên ở đầu 300°, tiếp tuyến theo chiều tăng góc
+            t = np.radians(300)
+            tan = np.array([-np.sin(t), np.cos(t)])
+        else:               # CW: mũi tên ở đầu 30°, tiếp tuyến theo chiều giảm góc
+            t = np.radians(30)
+            tan = np.array([np.sin(t), -np.cos(t)])
         tip = center + radius * np.array([np.cos(t), np.sin(t)])
-        ax.add_patch(FancyArrowPatch(tip + np.array([.06, .06]), tip, color=color, lw=1.8,
-                                     arrowstyle="-|>", mutation_scale=11, zorder=3))
+        ax.add_patch(FancyArrowPatch(tip - .12 * tan, tip, color=color, lw=1.8,
+                                     arrowstyle="-|>", mutation_scale=11, zorder=3,
+                                     shrinkA=0, shrinkB=0))
         ax.annotate(label, center, textcoords="offset points", xytext=(-30, 0),
                     color=color, fontsize=11, fontweight="bold")
         return center
 
-    c3 = moment_arc(M + .55 * np.array([-1, .3]), .32, r"$M_3$", C["m3"])
-    c4 = moment_arc((Cc + D) / 2 + .5 * np.array([.6, .2]), .32, r"$M_4$", C["m4"])
+    c3 = moment_arc(M + .55 * np.array([-1, .3]), .32, r"$M_3$", C["m3"], p["M3"])
+    c4 = moment_arc((Cc + D) / 2 + .5 * np.array([.6, .2]), .32, r"$M_4$", C["m4"], p["M4"])
 
     # nhãn chiều dài
     def lab(P1, P2, name, val, off=(0, 6)):
@@ -303,8 +342,12 @@ def draw_mechanism(ax, pts, p):
     allp = list(pts.values()) + [Ftip, c3, c4]
     xs = [q[0] for q in allp]
     ys = [q[1] for q in allp]
-    ax.set_xlim(min(xs) - 1.4, max(xs) + 1.6)
-    ax.set_ylim(min(ys) - 1.4, max(ys) + 1.0)
+    if lim is not None:
+        ax.set_xlim(lim[0], lim[1])
+        ax.set_ylim(lim[2], lim[3])
+    else:
+        ax.set_xlim(min(xs) - 1.4, max(xs) + 1.6)
+        ax.set_ylim(min(ys) - 1.4, max(ys) + 1.0)
     ax.grid(True, ls=":", lw=.7, color=C["grid"], alpha=.8)
     ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
     for sp in ax.spines.values():
@@ -312,7 +355,7 @@ def draw_mechanism(ax, pts, p):
 
 
 # ----------------------------------------------------------------------
-# 3b. VẼ HỌA ĐỒ VẬN TỐC
+# 3b. VẼ HỌA ĐỒ VẬN TỐC / GIA TỐC
 #     Cực p (≡ a ≡ d, vận tốc = 0);  pb = vB, pc = vC, bc = vCB,
 #     m nằm trên bc (theo tỉ lệ lBM/lBC), pm = vM, pe = vE, me = vEM.
 #     Các vectơ vẽ đúng phương, chiều thực (không xoay 90°).
@@ -427,7 +470,10 @@ def load_history():
         with open(HISTORY_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
         if isinstance(data, list):
-            return [h for h in data if isinstance(h, dict) and "params" in h]
+            # chỉ nhận các dòng có đủ khóa thông số (tránh lỗi với file lịch sử cũ/thiếu)
+            return [h for h in data
+                    if isinstance(h, dict) and isinstance(h.get("params"), dict)
+                    and all(k in h["params"] for k in ALL_KEYS)]
     except (OSError, ValueError):
         pass
     return []
@@ -483,6 +529,11 @@ class MechanismHMI(tk.Tk):
                           "DejaVu Sans", "Arial"], "TkDefaultFont")
         MONO = pick_font(["Consolas", "IBM Plex Mono", "DejaVu Sans Mono",
                           "Menlo", "Courier New"], "TkFixedFont")
+        self.animating = False
+        self.anim_dir = 1
+        self._anim_job = None
+        self._anim_lim = None
+        self._prev_C = None          # vị trí C của khung hình trước (giữ liên tục nhánh)
         self._style()
         self._header()
         body = tk.Frame(self, bg=C["page"])
@@ -518,7 +569,6 @@ class MechanismHMI(tk.Tk):
                foreground=[("readonly", C["text"])],
                selectbackground=[("readonly", "white")],
                selectforeground=[("readonly", C["text"])])
-        # Notebook (tab Cấu trúc / Vận tốc)
         st.configure("TNotebook", background=C["card"], borderwidth=0)
         st.configure("TNotebook.Tab", padding=(18, 8), font=(FONT, 11, "bold"),
                      background=C["code_bg"], foreground=C["muted"], borderwidth=0)
@@ -604,6 +654,20 @@ class MechanismHMI(tk.Tk):
             w.grid(row=r * 2 + 1, column=col, columnspan=span, sticky="ew",
                    padx=(0 if col == 0 else 8, 0), ipady=7 if not combo else 2)
 
+        # ---- chọn phương án cho trước ----
+        pc_ = card(inner)
+        pc_.pack(fill="x", pady=(0, 14))
+        tk.Label(pc_, text="0 · PHƯƠNG ÁN CHO TRƯỚC (BẢNG 1)", bg=C["card"], fg=C["teal"],
+                 font=(FONT, 12, "bold")).pack(anchor="w", padx=18, pady=(16, 8))
+        prow = tk.Frame(pc_, bg=C["card"])
+        prow.pack(fill="x", padx=18, pady=(0, 16))
+        for i, name in enumerate(PRESETS):
+            prow.columnconfigure(i, weight=1, uniform="pa")
+            b = tk.Label(prow, text=name, bg=C["teal_soft"], fg=C["teal"],
+                         font=(FONT, 11, "bold"), pady=9, cursor="hand2")
+            b.bind("<Button-1>", lambda e, n=name: self.on_preset(n))
+            b.grid(row=0, column=i, sticky="ew", padx=(0 if i == 0 else 8, 0))
+
         g = section("1 · KÍCH THƯỚC KHÂU")
         for i, (a, b) in enumerate([("L2", "L3"), ("lBM", "lME"), ("L4", "L1")]):
             field(g, a, i, 0); field(g, b, i, 1)
@@ -627,8 +691,8 @@ class MechanismHMI(tk.Tk):
             b.bind("<Button-1>", lambda e: cmd())
             b.pack(**(pack_kw or dict(fill="x", pady=(0, 8))))
             return b
-        mkbtn(inner, "▶  Vẽ lược đồ & Phân tích (cấu trúc + vận tốc)", C["teal"], "white",
-              lambda: self.on_draw(False))
+        mkbtn(inner, "▶  Vẽ lược đồ & Phân tích (cấu trúc + vận tốc + gia tốc)",
+              C["teal"], "white", lambda: self.on_draw(False))
         mkbtn(inner, "💾  Lưu kết quả (ảnh + họa đồ + thông số)", C["teal_soft"], C["teal"],
               self.on_save)
 
@@ -680,6 +744,16 @@ class MechanismHMI(tk.Tk):
         tk.Label(top, text="Lược đồ cơ cấu", bg=C["card"], fg=C["text"],
                  font=(FONT, 15, "bold")).pack(side="left")
 
+        self.speed = tk.Scale(top, from_=1, to=10, orient="horizontal", length=120,
+                              label="Tốc độ", bg=C["card"], highlightthickness=0,
+                              troughcolor=C["teal_soft"], font=(FONT, 9))
+        self.speed.set(3)
+        self.speed.pack(side="right")
+        self.btn_anim = tk.Label(top, text="▶  Chạy chuyển động", bg=C["teal"], fg="white",
+                                 font=(FONT, 10, "bold"), padx=14, pady=8, cursor="hand2")
+        self.btn_anim.bind("<Button-1>", lambda e: self.on_anim_toggle())
+        self.btn_anim.pack(side="right", padx=(0, 14))
+
         self.fig = Figure(figsize=(6.6, 5.0), facecolor="white")
         self.fig.subplots_adjust(left=.01, right=.99, top=.99, bottom=.01)
         self.ax = self.fig.add_subplot(111)
@@ -699,12 +773,10 @@ class MechanismHMI(tk.Tk):
             tk.Label(row, text=text, bg=C["card"], fg=C["muted"],
                      font=(FONT, 10)).pack(side="left", padx=(0, 16))
 
-    # ---------- cột phải: tab Cấu trúc + tab Vận tốc ----------
+    # ---------- cột phải: tab Cấu trúc + Vận tốc + Gia tốc ----------
     TAB_STRIP = "#ffffff"   # nền thanh tab (trắng)
 
     def _right(self, body):
-        # Thanh tab kiểu Chrome: tab đang chọn sáng (trắng), bo góc trên, liền với nội dung
-        # bên dưới và to hơn; tab còn lại hòa vào nền thanh tab, nhỏ hơn.
         rc = card(body, width=480)
         rc.grid(row=0, column=2, sticky="ns", padx=(16, 0))
         rc.pack_propagate(False)
@@ -832,7 +904,6 @@ class MechanismHMI(tk.Tk):
         tk.Label(rc, text="vB = ω₂×AB ;  vC = vB + vCB = vD + vCD  (vD = 0)",
                  bg=C["card"], fg=C["muted"], font=(MONO, 9)).pack(anchor="w", padx=6, pady=(12, 10))
 
-        # thẻ ω3, ω4
         wr = tk.Frame(rc, bg=C["card"])
         wr.pack(fill="x", padx=16)
         wr.columnconfigure(0, weight=1, uniform="w")
@@ -851,12 +922,10 @@ class MechanismHMI(tk.Tk):
                                        font=(FONT, 9), wraplength=170, justify="left", anchor="w")
             self.w_dir[key].pack(anchor="w", padx=12, pady=(0, 10))
 
-        # bảng vận tốc các điểm
         self.v_txt = tk.Label(rc, text="", bg=C["code_bg"], fg=C["text"], font=(MONO, 10),
                               justify="left", anchor="w", padx=14, pady=10, wraplength=420)
         self.v_txt.pack(fill="x", padx=16, pady=(10, 8))
 
-        # họa đồ vận tốc
         self.vfig = Figure(figsize=(4.4, 3.0), facecolor="white")
         self.vfig.subplots_adjust(left=.13, right=.96, top=.90, bottom=.22)
         self.vax = self.vfig.add_subplot(111)
@@ -982,6 +1051,10 @@ class MechanismHMI(tk.Tk):
             self._refresh_history_list()
 
     # ---------- logic ----------
+    def on_preset(self, name):
+        self.load_params(PRESETS[name])   # nạp vào các ô nhập và vẽ
+        self.on_draw(False)               # ghi vào lịch sử như khi bấm "Vẽ"
+
     def load_params(self, p):
         self._loading = True
         for k, v in p.items():
@@ -1009,6 +1082,8 @@ class MechanismHMI(tk.Tk):
                 p[key] = float(raw)
             except ValueError:
                 raise ValueError(f"Giá trị không hợp lệ tại '{label}': '{raw}'")
+            if not np.isfinite(p[key]):
+                raise ValueError(f"Giá trị không hợp lệ tại '{label}': '{raw}'")
         for key, label in DIR_FIELDS:
             v = self.dir_vars[key].get()
             if not v:
@@ -1016,6 +1091,8 @@ class MechanismHMI(tk.Tk):
             p[key] = v
         if min(p["L1"], p["L2"], p["L3"], p["L4"]) <= 0:
             raise ValueError("Chiều dài các khâu (L1, L2, L3, L4) phải > 0.")
+        if p["lBM"] < 0 or p["lME"] < 0:
+            raise ValueError("lBM và lME phải ≥ 0.")
         if p["lBM"] > p["L3"]:
             raise ValueError("lBM phải ≤ L3 = lBC (M nằm trên đoạn BC).")
         return p
@@ -1033,8 +1110,10 @@ class MechanismHMI(tk.Tk):
     def on_draw(self, silent=False):
         try:
             p = self._read_params()
-            pts = solve_positions(p)
+            pts = solve_positions(p, self._prev_C if self.animating else None)
         except ValueError as ex:
+            # dữ liệu lỗi: xóa kết quả cũ để không lưu nhầm thông số cũ
+            self.last_params = None
             self.last_vel = None
             self.last_acc = None
             self._update_velocity(None, str(ex))
@@ -1044,11 +1123,13 @@ class MechanismHMI(tk.Tk):
             else:
                 messagebox.showerror("Lỗi dữ liệu", str(ex))
             return
-        draw_mechanism(self.ax, pts, p)
+        if self.animating:
+            self._prev_C = pts["C"]
+        draw_mechanism(self.ax, pts, p, self._anim_lim)
         self.canvas.draw_idle()
         self.last_params = p
 
-        # vận tốc (nếu gặp vị trí đặc biệt thì vẫn vẽ lược đồ, chỉ báo lỗi ở tab Vận tốc)
+        # vận tốc, gia tốc (nếu gặp vị trí đặc biệt thì vẫn vẽ lược đồ, chỉ báo lỗi ở các tab)
         try:
             self.last_vel = solve_velocities(p, pts)
             self._update_velocity(self.last_vel)
@@ -1063,13 +1144,63 @@ class MechanismHMI(tk.Tk):
         if not silent:           # chỉ lưu lịch sử khi người dùng chủ động bấm Vẽ
             self._add_history(p)
 
+    def on_anim_toggle(self):
+        if self.animating:
+            self.animating = False
+            self._anim_lim = None
+            self._prev_C = None
+            self.btn_anim.config(text="▶  Chạy chuyển động", bg=C["teal"])
+            if self._anim_job:
+                self.after_cancel(self._anim_job)
+                self._anim_job = None
+            return
+        try:
+            p = self._read_params()
+            self._prev_C = solve_positions(p)["C"]
+        except ValueError as ex:
+            messagebox.showerror("Lỗi dữ liệu", str(ex))
+            return
+        self._anim_lim = compute_view_limits(p)
+        self.animating = True
+        self.anim_dir = 1
+        self.btn_anim.config(text="⏸  Dừng", bg=C["danger"])
+        self._anim_tick()
+
+    def _anim_tick(self):
+        if not self.animating:
+            return
+        try:
+            p = self._read_params()
+        except ValueError:
+            self.on_anim_toggle()
+            return
+        step = float(self.speed.get())
+        base = -1 if p["omega2_dir"] == "cùng" else 1   # cùng chiều kim đồng hồ -> φ2 giảm
+        new = p["phi2"] + base * self.anim_dir * step
+        try:
+            solve_positions(dict(p, phi2=new), self._prev_C)
+        except ValueError:                               # hết hành trình -> đảo chiều
+            self.anim_dir *= -1
+            new = p["phi2"] + base * self.anim_dir * step
+            try:
+                solve_positions(dict(p, phi2=new), self._prev_C)
+            except ValueError:
+                self.on_anim_toggle()
+                return
+        self._loading = True                             # không kích hoạt vẽ trễ 450 ms
+        self.entries["phi2"].set(f"{new % 360:.1f}")
+        self._loading = False
+        self.on_draw(True)
+        if self.animating:
+            self._anim_job = self.after(40, self._anim_tick)
+
     def on_save(self):
         if self.last_params is None:
             messagebox.showwarning("Chưa có kết quả", "Hãy nhập thông số hợp lệ trước khi lưu.")
             return
         default = "coCau_" + datetime.now().strftime("%Y%m%d_%H%M%S")
         path = filedialog.asksaveasfilename(
-            title="Lưu kết quả (tạo ảnh lược đồ, ảnh họa đồ vận tốc và .txt)",
+            title="Lưu kết quả (tạo ảnh lược đồ, ảnh họa đồ vận tốc, gia tốc và .txt)",
             defaultextension=".png",
             initialfile=default, filetypes=[("Ảnh PNG", "*.png"), ("Ảnh PDF", "*.pdf")])
         if not path:
